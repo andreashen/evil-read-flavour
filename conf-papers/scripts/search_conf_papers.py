@@ -587,6 +587,59 @@ def filter_and_score_papers(papers: List[Dict], cp_config: Dict, top_n: int = 10
     return scored_papers[:top_n]
 
 
+def apply_score_thresholds(
+    papers: List[Dict],
+    min_relevance: Optional[float] = None,
+    min_popularity: Optional[float] = None,
+    min_recommendation: Optional[float] = None,
+) -> List[Dict]:
+    filtered = []
+    for p in papers:
+        scores = p.get('scores', {})
+        relevance = scores.get('relevance', 0.0)
+        popularity = scores.get('popularity', 0.0)
+        recommendation = scores.get('recommendation', 0.0)
+        if min_relevance is not None and relevance < min_relevance:
+            continue
+        if min_popularity is not None and popularity < min_popularity:
+            continue
+        if min_recommendation is not None and recommendation < min_recommendation:
+            continue
+        filtered.append(p)
+    return filtered
+
+
+def deduplicate_ranked_papers(papers: List[Dict]) -> List[Dict]:
+    sorted_papers = sorted(
+        papers,
+        key=lambda x: (
+            x.get('scores', {}).get('recommendation', 0.0),
+            x.get('influentialCitationCount', 0),
+            x.get('citationCount', 0),
+        ),
+        reverse=True
+    )
+    seen_arxiv_ids = set()
+    seen_titles = set()
+    unique = []
+    for p in sorted_papers:
+        arxiv_id = p.get('arxiv_id')
+        if arxiv_id:
+            if arxiv_id in seen_arxiv_ids:
+                continue
+            seen_arxiv_ids.add(arxiv_id)
+            unique.append(p)
+            continue
+        title_norm = re.sub(r'[^a-z0-9\s]', '', p.get('title', '').lower()).strip()
+        if not title_norm:
+            continue
+        if title_norm in seen_titles:
+            continue
+        seen_titles.add(title_norm)
+        unique.append(p)
+    return unique
+
+
 # ---------------------------------------------------------------------------
 # 主函数
 # ---------------------------------------------------------------------------
@@ -603,14 +656,30 @@ def main():
                         help='Output JSON file path')
     parser.add_argument('--year', type=int, default=None,
                         help='Conference year to search (default: from config)')
+    parser.add_argument('--start-year', type=int, default=None,
+                        help='Start year for range search')
+    parser.add_argument('--end-year', type=int, default=None,
+                        help='End year for range search')
     parser.add_argument('--conferences', type=str, default=None,
                         help='Comma-separated conference names (default: from config)')
     parser.add_argument('--top-n', type=int, default=None,
                         help='Number of top papers to return (default: from config)')
+    parser.add_argument('--global-top-n', type=int, default=None,
+                        help='Global top N for range search')
+    parser.add_argument('--per-year-top-n', type=int, default=None,
+                        help='Per-year top N before global merge')
     parser.add_argument('--max-per-venue', type=int, default=1000,
                         help='Max papers to fetch per venue from DBLP')
     parser.add_argument('--skip-enrichment', action='store_true',
                         help='Skip Semantic Scholar enrichment (for debugging)')
+    parser.add_argument('--strict', action='store_true',
+                        help='Enable stricter score thresholds')
+    parser.add_argument('--min-relevance', type=float, default=None,
+                        help='Minimum relevance score (0-3)')
+    parser.add_argument('--min-popularity', type=float, default=None,
+                        help='Minimum popularity score (0-3)')
+    parser.add_argument('--min-recommendation', type=float, default=None,
+                        help='Minimum final recommendation score (0-10)')
 
     args = parser.parse_args()
 
@@ -630,14 +699,41 @@ def main():
     logger.info("Config: %d keywords, %d excluded",
                 len(cp_config['keywords']), len(cp_config['excluded_keywords']))
 
-    # 确定年份：命令行 > 配置 > 报错
-    year = args.year or cp_config.get('default_year')
-    if not year:
-        logger.error("未指定搜索年份。请通过 --year 参数或配置文件 conf_papers.default_year 设置。")
-        return 1
+    use_year_range = args.start_year is not None or args.end_year is not None
+    if use_year_range:
+        start_year = args.start_year if args.start_year is not None else args.end_year
+        end_year = args.end_year if args.end_year is not None else args.start_year
+        if start_year is None or end_year is None:
+            logger.error("年份区间参数无效，请同时提供 --start-year/--end-year 或提供其中一个。")
+            return 1
+        if start_year > end_year:
+            logger.error("年份区间无效：start_year(%d) > end_year(%d)", start_year, end_year)
+            return 1
+        years = list(range(start_year, end_year + 1))
+    else:
+        year = args.year or cp_config.get('default_year')
+        if not year:
+            logger.error("未指定搜索年份。请通过 --year 参数或配置文件 conf_papers.default_year 设置。")
+            return 1
+        years = [year]
 
-    # 确定 top_n：命令行 > 配置 > 默认 10
-    top_n = args.top_n or cp_config.get('top_n', 10)
+    if use_year_range:
+        global_top_n = args.global_top_n or args.top_n or 20
+        per_year_top_n = args.per_year_top_n or max(global_top_n * 3, 60)
+    else:
+        global_top_n = args.global_top_n or args.top_n or cp_config.get('top_n', 10)
+        per_year_top_n = args.per_year_top_n or global_top_n
+
+    min_relevance = args.min_relevance
+    min_popularity = args.min_popularity
+    min_recommendation = args.min_recommendation
+    if args.strict:
+        if min_relevance is None:
+            min_relevance = 1.2
+        if min_popularity is None:
+            min_popularity = 0.6
+        if min_recommendation is None:
+            min_recommendation = 6.0
 
     # 确定要搜索的会议：命令行 > 配置 > 全部 7 个
     if args.conferences:
@@ -663,92 +759,91 @@ def main():
         return 1
 
     logger.info("Conferences: %s", ', '.join(venues))
-    logger.info("Year: %d", year)
-
-    # ========== 第一步：DBLP 搜索 ==========
-    logger.info("=" * 70)
-    logger.info("Step 1: Searching papers from DBLP")
-    logger.info("=" * 70)
-
-    all_papers = search_all_conferences(year, venues, max_per_venue=args.max_per_venue)
-    total_found = len(all_papers)
-    logger.info("Total papers found from DBLP: %d", total_found)
-
-    if not all_papers:
-        logger.warning("No papers found from DBLP!")
-        # 输出空结果
-        output = {
-            "year": year,
-            "conferences_searched": venues,
-            "total_found": 0,
-            "total_enriched": 0,
-            "total_unique": 0,
-            "top_papers": [],
-        }
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
-        print(json.dumps(output, ensure_ascii=False, indent=2))
-        return 0
-
-    # ========== 第二步：轻量关键词过滤 ==========
-    logger.info("=" * 70)
-    logger.info("Step 2: Lightweight keyword filtering")
-    logger.info("=" * 70)
-
-    filtered_papers = lightweight_keyword_filter(all_papers, cp_config)
-    total_filtered = len(filtered_papers)
-
-    if not filtered_papers:
-        logger.warning("No papers passed keyword filter!")
-        output = {
-            "year": year,
-            "conferences_searched": venues,
-            "total_found": total_found,
-            "total_enriched": 0,
-            "total_unique": 0,
-            "top_papers": [],
-        }
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
-        print(json.dumps(output, ensure_ascii=False, indent=2))
-        return 0
-
-    # ========== 第三步：Semantic Scholar 补充 ==========
-    total_enriched = 0
-    if not args.skip_enrichment:
-        logger.info("=" * 70)
-        logger.info("Step 3: Enriching with Semantic Scholar (%d papers)", len(filtered_papers))
-        logger.info("=" * 70)
-
-        filtered_papers = enrich_with_semantic_scholar(filtered_papers)
-        total_enriched = sum(1 for p in filtered_papers if p.get('s2_matched'))
+    if use_year_range:
+        logger.info("Years: %d-%d", years[0], years[-1])
     else:
-        logger.info("Skipping Semantic Scholar enrichment (--skip-enrichment)")
+        logger.info("Year: %d", years[0])
 
-    # ========== 第四步：评分排序 ==========
-    logger.info("=" * 70)
-    logger.info("Step 4: Scoring and ranking")
-    logger.info("=" * 70)
+    aggregated_scored = []
+    total_found = 0
+    total_filtered = 0
+    total_enriched = 0
 
-    top_papers = filter_and_score_papers(filtered_papers, cp_config, top_n=top_n)
+    for year in years:
+        logger.info("=" * 70)
+        logger.info("Year %d: Step 1/4 Searching papers from DBLP", year)
+        logger.info("=" * 70)
+        all_papers = search_all_conferences(year, venues, max_per_venue=args.max_per_venue)
+        total_found += len(all_papers)
+        logger.info("Year %d: DBLP total %d", year, len(all_papers))
 
-    # 清理输出中的内部字段
+        if not all_papers:
+            continue
+
+        logger.info("=" * 70)
+        logger.info("Year %d: Step 2/4 Lightweight keyword filtering", year)
+        logger.info("=" * 70)
+        filtered_papers = lightweight_keyword_filter(all_papers, cp_config)
+        total_filtered += len(filtered_papers)
+        if not filtered_papers:
+            continue
+
+        if not args.skip_enrichment:
+            logger.info("=" * 70)
+            logger.info("Year %d: Step 3/4 Enriching with Semantic Scholar (%d papers)", year, len(filtered_papers))
+            logger.info("=" * 70)
+            filtered_papers = enrich_with_semantic_scholar(filtered_papers)
+            total_enriched += sum(1 for p in filtered_papers if p.get('s2_matched'))
+        else:
+            logger.info("Year %d: Skipping Semantic Scholar enrichment (--skip-enrichment)", year)
+
+        logger.info("=" * 70)
+        logger.info("Year %d: Step 4/4 Scoring and ranking", year)
+        logger.info("=" * 70)
+        scored_papers = filter_and_score_papers(filtered_papers, cp_config, top_n=per_year_top_n)
+        scored_papers = apply_score_thresholds(
+            scored_papers,
+            min_relevance=min_relevance,
+            min_popularity=min_popularity,
+            min_recommendation=min_recommendation,
+        )
+        for p in scored_papers:
+            p['search_year'] = year
+        aggregated_scored.extend(scored_papers)
+
+    unique_papers = deduplicate_ranked_papers(aggregated_scored)
+    unique_papers = apply_score_thresholds(
+        unique_papers,
+        min_relevance=min_relevance,
+        min_popularity=min_popularity,
+        min_recommendation=min_recommendation,
+    )
+    top_papers = unique_papers[:global_top_n]
+
     for p in top_papers:
         p.pop('_preliminary_keywords', None)
         p.pop('s2_matched', None)
         p.pop('s2_title_similarity', None)
         p.pop('categories', None)
-        p.pop('summary', None)  # 保留 abstract，去掉重复的 summary
+        p.pop('summary', None)
 
-    # 准备输出
     output = {
-        "year": args.year,
+        "mode": "year_range" if use_year_range else "single_year",
         "conferences_searched": venues,
         "total_found": total_found,
         "total_filtered": total_filtered,
         "total_enriched": total_enriched,
+        "total_unique": len(unique_papers),
         "top_papers": top_papers,
     }
+    if use_year_range:
+        output["start_year"] = years[0]
+        output["end_year"] = years[-1]
+        output["years"] = years
+        output["global_top_n"] = global_top_n
+        output["per_year_top_n"] = per_year_top_n
+    else:
+        output["year"] = years[0]
 
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(output, f, ensure_ascii=False, indent=2, default=str)

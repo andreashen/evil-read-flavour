@@ -432,13 +432,22 @@ python scripts/link_keywords.py \
 - 有参数（YYYY-MM-DD）：生成指定日期的论文推荐笔记
   - 例如：`/start-my-day 2026-02-27`
 
+**5年重要论文模式（新增）**：
+- `start my day 5y`：生成最近 5 年的重要论文推荐（默认 20 篇）
+- `start my day 5y top20 strict`：最近 5 年重要论文推荐，启用严格筛选
+- 该模式复用 `start-my-day/scripts/search_arxiv.py` 的评分能力，仅使用 arXiv 数据源，输出仍写入 Obsidian 文档
+
 ## 自动执行流程
 
-1. **获取目标日期**
+1. **判断执行模式**
+   - 若用户输入包含 `5y`：执行“5年重要论文模式”
+   - 否则：执行默认“近1个月 + 近1年”模式
+
+2. **获取目标日期**
    - 无参数：使用当前日期（YYYY-MM-DD格式）
    - 有参数：使用指定日期
 
-2. **扫描现有笔记构建索引**
+3. **扫描现有笔记构建索引**
    ```bash
    # 扫描 vault 中现有的论文笔记
    cd "$SKILL_DIR"
@@ -450,7 +459,7 @@ python scripts/link_keywords.py \
    - 提取笔记标题和 tags
    - 构建关键词到笔记路径的映射表
 
-3. **搜索和筛选 arXiv 论文**
+4A. **默认模式：搜索和筛选 arXiv 论文**
    ```bash
    # 使用 Python 脚本搜索、解析和筛选 arXiv 论文
    # 首先切换到 skill 目录，然后执行脚本
@@ -465,12 +474,12 @@ python scripts/link_keywords.py \
      --target-date "{目标日期}"  # 如果用户指定了日期，替换为实际日期
    ```
 
-4. **读取筛选结果**
+5A. **默认模式：读取筛选结果**
    - 从 `arxiv_filtered.json` 中读取筛选结果
    - 获取前 10 篇高评分论文
    - 每篇论文包含：ID、标题、作者、摘要、评分、匹配领域
 
-5. **生成推荐笔记（包含关键词链接）**
+6A. **默认模式：生成推荐笔记（包含关键词链接）**
    - 创建 `10_Daily/YYYY-MM-DD论文推荐.md`（使用目标日期）
    - **按评分排序**：所有论文按推荐评分从高到低排列
    - **前3篇特殊处理**：
@@ -485,7 +494,7 @@ python scripts/link_keywords.py \
      - 保留已有 wikilink 不被修改
      - 不替换代码块中的内容
 
-6. **对前三篇论文执行深度分析**
+7A. **默认模式：对前三篇论文执行深度分析**
    ```bash
    # 对每篇前三论文执行以下操作
 
@@ -516,6 +525,36 @@ python scripts/link_keywords.py \
      - 提取第一张图片并保存到 vault
      - 生成详细的论文分析报告
      - 在推荐笔记中添加图片和详细报告链接
+
+4B. **5年模式：仅使用 arXiv 搜索和筛选最近5年重要论文**
+   ```bash
+   cd "$SKILL_DIR"
+   python scripts/search_arxiv.py \
+     --config "$OBSIDIAN_VAULT_PATH/99_System/Config/research_interests.yaml" \
+     --output arxiv_5y_filtered.json \
+     --categories "cs.AI,cs.LG,cs.CL,cs.CV,cs.MM,cs.MA,cs.RO" \
+     --window-years 5 \
+     --arxiv-only \
+     --global-top-n 20 \
+     --per-year-max-results 200 \
+     --strict \
+     --target-date "{目标日期}"
+   ```
+
+5B. **5年模式：读取筛选结果**
+   - 从 `arxiv_5y_filtered.json` 读取结果
+   - 获取跨5年全局排序后的前20篇论文
+
+6B. **5年模式：生成推荐笔记（包含关键词链接）**
+   - 创建 `10_Daily/YYYY-MM-DD_5y重要论文推荐.md`
+   - 全部论文按综合评分从高到低排序
+   - 前 3 篇保持特殊处理：图片 + 深度分析（仅有 arXiv ID）
+   - 其余论文写基本信息和链接
+   - 继续执行关键词自动链接
+
+7B. **5年模式：对前三篇论文执行深度分析**
+   - 处理逻辑与默认模式一致
+   - 若已有笔记，优先引用，不重复生成
 
 ## 临时文件清理
 

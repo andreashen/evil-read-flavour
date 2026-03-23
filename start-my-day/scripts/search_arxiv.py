@@ -160,6 +160,17 @@ def calculate_date_windows(target_date: Optional[datetime] = None) -> Tuple[date
     return window_30d_start, window_30d_end, window_1y_start, window_1y_end
 
 
+def calculate_multi_year_windows(target_date: Optional[datetime], years: int) -> List[Tuple[datetime, datetime]]:
+    if target_date is None:
+        target_date = datetime.now()
+    windows = []
+    for i in range(years):
+        end_date = target_date - timedelta(days=365 * i)
+        start_date = target_date - timedelta(days=365 * (i + 1)) + timedelta(days=1)
+        windows.append((start_date, end_date))
+    return windows
+
+
 def search_arxiv_by_date_range(
     categories: List[str],
     start_date: datetime,
@@ -802,6 +813,28 @@ def filter_and_score_papers(
     return scored_papers
 
 
+def apply_score_thresholds(
+    papers: List[Dict],
+    min_relevance: Optional[float] = None,
+    min_quality: Optional[float] = None,
+    min_recommendation: Optional[float] = None
+) -> List[Dict]:
+    filtered = []
+    for paper in papers:
+        scores = paper.get('scores', {})
+        relevance = scores.get('relevance', 0.0)
+        quality = scores.get('quality', 0.0)
+        recommendation = scores.get('recommendation', 0.0)
+        if min_relevance is not None and relevance < min_relevance:
+            continue
+        if min_quality is not None and quality < min_quality:
+            continue
+        if min_recommendation is not None and recommendation < min_recommendation:
+            continue
+        filtered.append(paper)
+    return filtered
+
+
 def main():
     """主函数"""
     import argparse
@@ -827,6 +860,22 @@ def main():
                         help='Comma-separated list of arXiv categories')
     parser.add_argument('--skip-hot-papers', action='store_true',
                         help='Skip searching hot papers from Semantic Scholar')
+    parser.add_argument('--arxiv-only', action='store_true',
+                        help='Only search arXiv papers, skip Semantic Scholar hot papers')
+    parser.add_argument('--window-years', type=int, default=None,
+                        help='Search papers within the past N years from target date')
+    parser.add_argument('--global-top-n', type=int, default=None,
+                        help='Global top N papers for multi-year mode')
+    parser.add_argument('--per-year-max-results', type=int, default=None,
+                        help='Max results per year window in multi-year mode')
+    parser.add_argument('--strict', action='store_true',
+                        help='Enable stricter score thresholds for multi-year mode')
+    parser.add_argument('--min-relevance', type=float, default=None,
+                        help='Minimum relevance score threshold (0-3)')
+    parser.add_argument('--min-quality', type=float, default=None,
+                        help='Minimum quality score threshold (0-3)')
+    parser.add_argument('--min-recommendation', type=float, default=None,
+                        help='Minimum recommendation score threshold (0-10)')
 
     args = parser.parse_args()
 
@@ -857,13 +906,106 @@ def main():
         target_date = datetime.now()
         logger.info("Using current date: %s", target_date.strftime('%Y-%m-%d'))
 
+    # 解析分类
+    categories = args.categories.split(',')
+
+    if args.window_years is not None and args.window_years <= 0:
+        logger.error("window-years 必须是正整数")
+        return 1
+
+    if args.window_years:
+        all_scored_papers = []
+        yearly_stats = []
+        per_year_max_results = args.per_year_max_results or args.max_results
+        min_relevance = args.min_relevance
+        min_quality = args.min_quality
+        min_recommendation = args.min_recommendation
+        if args.strict:
+            if min_relevance is None:
+                min_relevance = 1.2
+            if min_quality is None:
+                min_quality = 0.5
+            if min_recommendation is None:
+                min_recommendation = 5.8
+
+        year_windows = calculate_multi_year_windows(target_date, args.window_years)
+        logger.info("Multi-year mode enabled: %d years", args.window_years)
+        for idx, (window_start, window_end) in enumerate(year_windows, 1):
+            logger.info("=" * 70)
+            logger.info("Year window %d/%d: %s to %s", idx, args.window_years, window_start.date(), window_end.date())
+            logger.info("=" * 70)
+            papers = search_arxiv_by_date_range(
+                categories=categories,
+                start_date=window_start,
+                end_date=window_end,
+                max_results=per_year_max_results
+            )
+            scored = filter_and_score_papers(
+                papers=papers,
+                config=config,
+                target_date=target_date,
+                is_hot_paper_batch=False
+            ) if papers else []
+            yearly_stats.append({
+                'window_index': idx,
+                'start': window_start.strftime('%Y-%m-%d'),
+                'end': window_end.strftime('%Y-%m-%d'),
+                'total_found': len(papers),
+                'total_scored': len(scored),
+            })
+            all_scored_papers.extend(scored)
+
+        all_scored_papers.sort(key=lambda x: x['scores']['recommendation'], reverse=True)
+        seen_ids = set()
+        seen_titles = set()
+        unique_papers = []
+        for p in all_scored_papers:
+            arxiv_id = p.get('arxiv_id') or p.get('arxivId')
+            if arxiv_id:
+                if arxiv_id not in seen_ids:
+                    seen_ids.add(arxiv_id)
+                    unique_papers.append(p)
+            else:
+                title = p.get('title', '')
+                title_normalized = re.sub(r'[^a-z0-9\s]', '', title.lower()).strip()
+                if title_normalized and title_normalized not in seen_titles:
+                    seen_titles.add(title_normalized)
+                    unique_papers.append(p)
+
+        unique_papers = apply_score_thresholds(
+            unique_papers,
+            min_relevance=min_relevance,
+            min_quality=min_quality,
+            min_recommendation=min_recommendation,
+        )
+        global_top_n = args.global_top_n or args.top_n or 20
+        top_papers = unique_papers[:global_top_n]
+        if len(top_papers) == 0:
+            logger.warning("No papers matched the criteria in multi-year mode!")
+            return 1
+
+        output = {
+            'mode': 'multi_year_arxiv_only',
+            'target_date': args.target_date or target_date.strftime('%Y-%m-%d'),
+            'window_years': args.window_years,
+            'yearly_windows': yearly_stats,
+            'total_unique': len(unique_papers),
+            'global_top_n': global_top_n,
+            'top_papers': top_papers
+        }
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+        logger.info("Results saved to: %s", args.output)
+        logger.info("Top %d papers:", len(top_papers))
+        for i, p in enumerate(top_papers, 1):
+            logger.info("  %d. %s... (Score: %s)", i, p.get('title', 'N/A')[:60], p['scores']['recommendation'])
+        print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+        return 0
+
     window_30d_start, window_30d_end, window_1y_start, window_1y_end = calculate_date_windows(target_date)
     logger.info("Date windows:")
     logger.info("  Recent 30 days: %s to %s", window_30d_start.date(), window_30d_end.date())
     logger.info("  Past year (31-365 days): %s to %s", window_1y_start.date(), window_1y_end.date())
-
-    # 解析分类
-    categories = args.categories.split(',')
 
     all_scored_papers = []
     recent_papers = []
@@ -894,7 +1036,7 @@ def main():
         logger.warning("No recent papers found")
 
     # ========== 第二步：搜索过去一年的高影响力论文（Semantic Scholar）==========
-    if not args.skip_hot_papers:
+    if not args.skip_hot_papers and not args.arxiv_only:
         logger.info("=" * 70)
         logger.info("Step 2: Searching hot papers (past year) from Semantic Scholar")
         logger.info("=" * 70)
@@ -919,7 +1061,7 @@ def main():
         else:
             logger.warning("No hot papers found from Semantic Scholar")
     else:
-        logger.info("Skipping hot paper search (disabled by user)")
+        logger.info("Skipping hot paper search (disabled by user or arxiv-only mode)")
 
     # ========== 第三步：合并结果并排序 ==========
     logger.info("=" * 70)

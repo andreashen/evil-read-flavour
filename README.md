@@ -15,6 +15,7 @@
 
 | 日期 | 版本 | 更新内容 |
 |------|------|----------|
+| 2026-03-23 | v1.2 | `start-my-day` 新增 5 年 arXiv-only 模式（默认 Top20，支持 strict 阈值），降低 Semantic Scholar 限流影响；`conf-papers` 支持年份区间与全局排序 |
 | 2026-03-13 | v1.1 | 新增 `conf-papers` 技能：支持搜索 CVPR/ICCV/ECCV/ICLR/AAAI/NeurIPS/ICML 等顶级会议论文，基于 DBLP + Semantic Scholar 双数据源，独立配置文件，三维评分推荐 |
 | 2026-03-01 | v1.0 | 初始版本：start-my-day 每日推荐、paper-analyze 论文分析、extract-paper-images 图片提取、paper-search 论文搜索 |
 
@@ -24,6 +25,7 @@
 - 从 arXiv 搜索最近一个月的论文
 - 从 Semantic Scholar 搜索过去一年的高热度论文
 - 基于相关性、新近性、热门度、质量四个维度综合评分
+- 支持 5 年模式：仅使用 arXiv 搜索跨 5 年论文并全局排序（默认 Top20，支持 strict）
 - 自动生成今日概览和推荐列表
 - 前三篇论文自动生成详细分析和提取图片
 - 自动链接关键词到已有笔记
@@ -199,6 +201,26 @@ start my day
 5. 提取论文图片并插入笔记
 6. 自动链接关键词到已有笔记
 
+### 开始 5 年重要论文推荐（arXiv-only）
+
+在 Claude Code / opencode 中输入：
+
+```bash
+start my day 5y
+```
+
+可选更严格筛选：
+
+```bash
+start my day 5y top20 strict
+```
+
+5 年模式特性：
+1. 仅使用 arXiv 数据源，避免 Semantic Scholar 限流
+2. 按最近 5 年窗口检索并全局去重排序
+3. 默认保留 Top20 论文
+4. 仍生成 Obsidian 推荐文档并保留前 3 篇深度分析流程
+
 ### 分析单篇论文
 
 如果你想深入阅读某篇论文：
@@ -238,7 +260,7 @@ evil-read-arxiv/
 ├── start-my-day/             # 每日推荐技能
 │   ├── SKILL.md              # 技能定义文件
 │   └── scripts/
-│       ├── search_arxiv.py   # arXiv/Semantic Scholar 搜索脚本
+│       ├── search_arxiv.py   # 支持默认模式与5年 arXiv-only 模式
 │       ├── scan_existing_notes.py  # 扫描现有笔记
 │       └── link_keywords.py  # 关键词自动链接脚本
 ├── paper-analyze/            # 论文分析技能
@@ -256,7 +278,7 @@ evil-read-arxiv/
     ├── SKILL.md              # 技能定义文件
     ├── conf-papers.yaml      # 独立配置（关键词、会议、年份）
     └── scripts/
-        └── search_conf_papers.py  # DBLP搜索 + S2补充 + 评分
+        └── search_conf_papers.py  # 单年/区间搜索 + 全局排序
 ```
 
 ## 评分机制

@@ -39,8 +39,9 @@ top_n: 10                    # 返回论文数量
 
 ## 步骤1：解析参数
 
-1. **提取年份**（可选，默认从配置读取）
+1. **提取年份或年份区间**（可选，默认从配置读取）
    - 从用户输入中提取年份，如 `/conf-papers 2025`
+   - 或提取年份区间，如 `/conf-papers 2022-2026`
    - 未指定时使用配置中的 `conf_papers.default_year`
 
 2. **提取会议名**（可选，默认从配置读取）
@@ -72,7 +73,22 @@ python scripts/search_conf_papers.py \
   --conferences "{会议列表，逗号分隔}"
 ```
 
-> 注意：`--config` 默认指向 skill 目录下的 `conf-papers.yaml`，通常不需要手动指定。`--year` 和 `--conferences` 未指定时使用配置文件中的默认值。
+年份区间模式：
+
+```bash
+cd "$SKILL_DIR"
+python scripts/search_conf_papers.py \
+  --config "$SKILL_DIR/conf-papers.yaml" \
+  --output conf_papers_5y_filtered.json \
+  --start-year {开始年份} \
+  --end-year {结束年份} \
+  --conferences "{会议列表，逗号分隔}" \
+  --global-top-n 20 \
+  --per-year-top-n 60 \
+  --strict
+```
+
+> 注意：`--config` 默认指向 skill 目录下的 `conf-papers.yaml`。单年模式可用 `--year`，区间模式用 `--start-year/--end-year`。`--strict` 会启用更严格筛选阈值。
 
 **脚本工作流**：
 1. **DBLP 搜索**：调用 DBLP API 获取指定会议和年份的全部论文
@@ -99,10 +115,12 @@ cat conf_papers_filtered.json
 
 **结果包含**：
 - `year`: 搜索年份
+- `start_year/end_year/years`: 区间模式下的年份信息
 - `conferences_searched`: 搜索的会议列表
 - `total_found`: DBLP 搜索到的总论文数
 - `total_filtered`: 关键词过滤后的论文数
 - `total_enriched`: S2 补充成功的论文数
+- `total_unique`: 跨年份去重后的候选数
 - `top_papers`: 前 N 篇高评分论文，每篇包含：
   - title, authors, conference, year
   - dblp_url, arxiv_id（如有）
@@ -284,6 +302,7 @@ python scripts/link_keywords.py \
 - **搜索范围**：近一个月 + 近一年热门论文
 - **评分维度**：相关性 + 新近性 + 热门度 + 质量
 - **输出**：每日推荐笔记
+- **扩展模式**：支持 `start my day 5y` 的 arXiv-only 五年检索（默认 Top20）
 
 # 使用说明
 
@@ -291,6 +310,7 @@ python scripts/link_keywords.py \
 
 **参数支持**：
 - 可选：年份（如 `2025`），未指定时使用配置中的 `conf_papers.default_year`
+- 可选：年份区间（如 `2022-2026`，映射到 `--start-year 2022 --end-year 2026`）
 - 可选：会议名（如 `ICLR,CVPR`，逗号分隔），未指定时使用配置中的 `conf_papers.default_conferences`
 - 搜索关键词和排除关键词均从 `conf_papers` 配置段读取
 - 示例：
@@ -298,11 +318,13 @@ python scripts/link_keywords.py \
   - `/conf-papers 2025` — 搜索配置中默认会议的 2025 年论文
   - `/conf-papers 2024 ICLR` — 仅搜索 ICLR 2024
   - `/conf-papers 2024 CVPR,NeurIPS` — 搜索 CVPR 和 NeurIPS 2024
+  - `/conf-papers 2022-2026` — 搜索最近5年并全局排序
+  - `/conf-papers 2022-2026 ICLR,NeurIPS strict` — 区间模式 + 会议限定 + 严格筛选
 
 ## 自动执行流程
 
 1. **解析参数**
-   - 提取年份和可选会议名
+   - 提取年份/年份区间和可选会议名
    - 验证会议名是否在支持列表中
 
 2. **扫描现有笔记构建索引**
@@ -323,10 +345,24 @@ python scripts/link_keywords.py \
      --conferences "{会议列表}" \
      --top-n 10
    ```
+   - 区间模式使用：
+   ```bash
+   cd "$SKILL_DIR"
+   python scripts/search_conf_papers.py \
+     --config "$SKILL_DIR/conf-papers.yaml" \
+     --output conf_papers_5y_filtered.json \
+     --start-year {开始年份} \
+     --end-year {结束年份} \
+     --conferences "{会议列表}" \
+     --global-top-n 20 \
+     --per-year-top-n 60 \
+     --strict
+   ```
 
 4. **读取筛选结果**
    - 从 `conf_papers_filtered.json` 中读取
-   - 获取前 10 篇高评分论文
+   - 单年模式：获取前 10 篇高评分论文
+   - 区间模式：获取跨年份去重后前 20 篇高评分论文
 
 5. **生成推荐笔记（包含关键词链接）**
    - 创建 `10_Daily/{年份}_顶会论文推荐.md`

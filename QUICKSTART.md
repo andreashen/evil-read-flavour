@@ -110,7 +110,21 @@ claude-code
 start my day
 ```
 
-### 3. 分析单篇论文
+### 3. 开始 5 年重要论文推荐（arXiv-only）
+
+在 Claude Code 中输入：
+
+```
+start my day 5y
+```
+
+如果希望结果更精：
+
+```
+start my day 5y top20 strict
+```
+
+### 4. 分析单篇论文
 
 在 Claude Code 中输入：
 
